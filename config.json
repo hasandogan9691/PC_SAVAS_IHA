@@ -1,0 +1,32 @@
+{
+    "uav_connection": {
+        "port": "udp:127.0.0.1:14540",
+        "baudrate": 115200,
+        "timeout": 15
+    },
+    "gcs_connection": {
+        "ip": "127.0.0.1",
+        "telemetry_port": 5005,
+        "command_port": 5006
+    },
+    "teknofest_api": {
+        "base_url": "http://127.0.0.1:8080",
+        "login_endpoint": "/auth/login",
+        "lock_endpoint": "/kilitlenme",
+        "username": "Takim_PX4_PC",
+        "password": "px4_password",
+        "timeout": 1.0
+    },
+    "vision_settings": {
+        "width": 640,
+        "height": 480
+    },
+    "pid_tuning": {
+        "kp_yaw": 0.015,
+        "ki_yaw": 0.0,
+        "kd_yaw": 0.001,
+        "kp_pitch": 0.4,
+        "max_yaw_rate": 0.4,
+        "max_forward_speed": 2.5
+    }
+}

@@ -1,0 +1,1 @@
+{"network_settings": {"listen_ip": "0.0.0.0", "telemetry_port": 5005, "uav_ip": "127.0.0.1", "command_port": 5006, "crypto_key": ""}, "gui_settings": {"window_title": "TEKNOFEST Yer Kontrol Istasyonu", "width": 1280, "height": 720, "log_file": "gcs_locks.csv"}}

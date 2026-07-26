@@ -1,0 +1,11 @@
+# Sanal ortam ve Python önbellekleri
+uav_env/
+__pycache__/
+*.pyc
+*.pyo
+
+# Uçuş logları ve geçici sistem dosyaları
+log/
+*.ulg
+*.log
+.DS_Store

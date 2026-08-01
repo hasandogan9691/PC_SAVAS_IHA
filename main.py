@@ -1,102 +1,130 @@
 import time
-import json
-import sys
-import signal
 import socket
+import multiprocessing as mp
 
-# YENİ NESİL MODÜLER YAPI: Yapay zeka tespit motorunu kendi yazdığımız rakip_iha dosyasından çağırıyoruz
-from rakip_iha import MockVisionProcessor
+from ucus_kontrolcusu import UcusKontrolcusu
+from kamera_isleme import kamera_islem_sureci
+from hedef_yoneticisi import hedef_yoneticisi_dongusu
 
-class PCSavasanIHAMasterSim:
-    def __init__(self):
-        with open("config.json", "r") as f:
-            self.config = json.load(f)
-        self.system_running = False
-        self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        
-        # Dışarıdan çağırdığımız yapay zeka nesnesini başlatıyoruz
-        self.vision = MockVisionProcessor()
-        
-        # Askeri Görev Strateji Safhaları (Savaş FSM)
-        self.fsm_state = "SEARCHING" 
-        self.lock_start_time = None
-        
-        # Canlı Simülasyon Veri Paketi
-        self.telemetry_data = {
-            "mode": "OFFBOARD",
-            "is_armed": True,
-            "voltage": 15.4,
-            "battery_percent": 100,
-            "lat": 40.123456,
-            "lon": 32.567890,
-            "alt": 15.0,
-            "relative_alt": 15.0,
-            "ekf_healthy": True
-        }
+# ============================================================
+# HAKEM SUNUCUSU (UDP BAĞLANTISI)
+# ============================================================
+HAKEM_IP = "127.0.0.1"
+HAKEM_PORT = 10000
+hakem_soketi = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-    def run(self):
-        self.system_running = True
-        print("\033[92m[MODÜLER SAVAŞ MOTORU AKTİF]\033[0m")
-        print("Yapay zeka verileri 'rakip_iha.py' kütüphanesinden canlı çekiliyor.")
-        
-        gcs_cfg = self.config["gcs_connection"]
-        yaw_rate_cmd = 0.0
+def hakem_masasina_bildir(mesaj):
+    try:
+        hakem_soketi.sendto(mesaj.encode('utf-8'), (HAKEM_IP, HAKEM_PORT))
+    except Exception:
+        pass
 
-        while self.system_running:
-            t1 = time.time()
+# ============================================================
+# ANA KARARGAH (BEYİN VE DURUM MAKİNESİ)
+# ============================================================
+def main():
+    print("[BEYİN] Ana karargah uyandırılıyor, DİNAMİK AV döngüsü başlatılıyor...")
+
+    ucus = UcusKontrolcusu()
+    ucus.baglan()
+
+    veri_kuyrugu = mp.Queue()
+    durdur_event = mp.Event()
+
+    goz_prosesi = mp.Process(target=kamera_islem_sureci, args=(veri_kuyrugu, durdur_event))
+    goz_prosesi.daemon = True
+    goz_prosesi.start()
+
+    hedef_prosesi = mp.Process(target=hedef_yoneticisi_dongusu, args=(durdur_event,))
+    hedef_prosesi.daemon = True
+    hedef_prosesi.start()
+
+    kalkis_yapildi_mi = False
+    kilitlenme_baslangic_zamani = None
+    kilitlenme_hedef_suresi = 4.0
+    son_hedef_x = 320
+    son_hedef_y = 240
+    
+    # //[EK] Dinamik hedef takibi için "Av Hafızası" değişkenleri eklendi.
+    son_hedef_gorme_zamani = 0
+    hafiza_suresi = 1.0  # Hedef kadrajdan çıkarsa 1 saniye boyunca aramaya devam et
+    son_vx, son_vy, son_vz = 1.0, 0.0, 0.0
+
+    print("[BEYİN] Otonom devriye ve avcı hafızası devrede...")
+
+    try:
+        while not durdur_event.is_set():
             
-            # Yapay zekadan anlık rakip koordinatlarını çek
-            drone_moving = (self.fsm_state in ["TRACKING", "LOCKING"])
-            v_data = self.vision.get_target_coordinates(drone_moving, yaw_rate_cmd)
-            
-            # TEKNOFEST Savaş FSM Algoritması
-            if self.fsm_state == "SEARCHING":
-                yaw_rate_cmd = 0.15 # 360 derece gökyüzünü tara
-                if v_data["detected"]:
-                    print("\033[93m[FSM]: Rakip İHA Kadraja Girdi! Takip Başlatılıyor...\033[0m")
-                    self.fsm_state = "TRACKING"
+            if not kalkis_yapildi_mi:
+                print("\n[BEYİN] Otonom kalkış gerçekleştiriliyor ve tarama moduna geçiliyor...")
+                ucus.otonom_kalkis_ve_saldiri_baslat(hedef_irtifa=2.5)
+                kalkis_yapildi_mi = True
+                time.sleep(2.0)
+                continue
 
-            elif self.fsm_state == "TRACKING":
-                # PID Kontrol: Pikselsel sapmayı kapatacak dönüş açısını hesapla
-                yaw_rate_cmd = (v_data["offset_x"] / 320.0) * self.config["pid_tuning"]["max_yaw_rate"]
-                
-                # Hedef merkezlendi mi? (30 piksel emniyet deadzone filtresi)
-                if abs(v_data["offset_x"]) < 30 and abs(v_data["offset_y"]) < 30:
-                    print("\033[96m[FSM]: Hedef Tam Merkezde! 3 Saniyelik Kilitlenme Geri Sayımı...\033[0m")
-                    self.fsm_state = "LOCKING"
-                    self.lock_start_time = time.time()
+            if veri_kuyrugu.empty():
+                time.sleep(0.01)
+                continue
 
-            elif self.fsm_state == "LOCKING":
-                yaw_rate_cmd = (v_data["offset_x"] / 320.0) * 0.1 # Kilidi korumak için mikro manevra
-                
-                if abs(v_data["offset_x"]) > 50:
-                    print("\033[91m[FSM]: Kilitlenme Koptu! Rakip Keskin Manevrayla Kaçtı.\033[0m")
-                    self.fsm_state = "TRACKING"
-                elif time.time() - self.lock_start_time >= 3.0:
-                    print("\033[92m🎯 [BAŞARILI VURUŞ]: 3 Saniye Kilitlenme Sağlandı! Puan Paketlendi.\033[0m")
-                    self.fsm_state = "SEARCHING" # Yeniden gökyüzü taramasına dön
+            tespit_verisi = veri_kuyrugu.get()
+            hedef_bulundu = tespit_verisi.get("tespit", False)
+            su_an = time.time()
 
-            # Durum çubuğunu anlık güncelle
-            self.telemetry_data["mode"] = f"OFFBOARD ({self.fsm_state})"
-            
-            # Paketleri yer istasyonuna UDP 5005 portuna fırlat
-            try:
-                packet_bytes = json.dumps(self.telemetry_data).encode('utf-8')
-                self.udp_sock.sendto(packet_bytes, (gcs_cfg["ip"], gcs_cfg["telemetry_port"]))
-            except Exception:
-                pass
+            if hedef_bulundu:
+                # //[EK] Hedefi gördüğümüz son anı hafızaya kaydediyoruz.
+                son_hedef_gorme_zamani = su_an
 
-            dt = time.time() - t1
-            if dt < 0.033:
-                time.sleep(0.033 - dt)
+                if kilitlenme_baslangic_zamani is None:
+                    kilitlenme_baslangic_zamani = su_an
+                    print("\n[AVCI] Dinamik hedef tespit edildi, kilitleniliyor!")
 
-    def terminate_system(self):
-        self.system_running = False
-        self.udp_sock.close()
-        print("Sistem Kapatildi.")
+                son_hedef_x = tespit_verisi.get("x", 320)
+                son_hedef_y = tespit_verisi.get("y", 240)
+
+                merkez_x = tespit_verisi.get("error_x", 0)
+                merkez_y = tespit_verisi.get("error_y", 0)
+
+                # //[EK] Hız ve reaksiyon katsayısı (0.005 -> 0.008) artırıldı, avcı daha agresif manevra yapacak.
+                son_vx = 2.5               
+                son_vy = merkez_x * 0.008    
+                son_vz = merkez_y * 0.008    
+
+                ucus.hiz_komutu_gonder(son_vx, son_vy, son_vz)
+
+                gecen_sure = su_an - kilitlenme_baslangic_zamani
+                durum_metni = f"[KİLİTLENME] {gecen_sure:.1f}s / {kilitlenme_hedef_suresi}s (Hız -> İleri: {son_vx}m/s, Yan: {son_vy:.1f}m/s)"
+                print(durum_metni)
+                hakem_masasina_bildir(durum_metni)
+
+                if gecen_sure >= kilitlenme_hedef_suresi:
+                    zafer_metni = f"[BEYİN] GÖREV BAŞARILI: Dinamik ({son_hedef_x:.1f}, {son_hedef_y:.1f}) hedef havada vuruldu!"
+                    print(f"\n{zafer_metni}\n")
+                    hakem_masasina_bildir(zafer_metni)
+                    
+                    ucus.hiz_komutu_gonder(0, 0, 0)
+                    kilitlenme_baslangic_zamani = None
+                    son_hedef_gorme_zamani = 0
+                    time.sleep(1.0)
+
+            else:
+                # //[EK] HEDEF HAFIZASI: Hedef kaybolduysa ama henüz hafıza süresi (1.0s) dolmadıysa, sayacı sıfırlama!
+                if (su_an - son_hedef_gorme_zamani) < hafiza_suresi:
+                    # //[EK] Son bilinen hızı koruyarak avı körleme takip etmeye devam et
+                    ucus.hiz_komutu_gonder(son_vx, son_vy, son_vz)
+                else:
+                    # //[EK] 1 Saniye geçti ve hedef dönmedi. Tamamen kaçtı, sayacı sıfırla ve devriyeye dön.
+                    ucus.hiz_komutu_gonder(1.0, 0.0, 0.0)
+                    if kilitlenme_baslangic_zamani is not None:
+                        print("[AVCI] Hedefin izi tamamen kaybedildi! Sayaç sıfırlandı, devriyeye dönülüyor...")
+                    kilitlenme_baslangic_zamani = None
+
+    except KeyboardInterrupt:
+        print("[BEYİN] Klavye kesintisi algılandı, sistem kapatılıyor.")
+    finally:
+        durdur_event.set()
+        goz_prosesi.join(timeout=2.0)
+        hedef_prosesi.join(timeout=2.0)
+        print("[BEYİN] Ana karargah güvenle kapatıldı.")
 
 if __name__ == "__main__":
-    master = PCSavasanIHAMasterSim()
-    signal.signal(signal.SIGINT, lambda s, f: (master.terminate_system(), sys.exit(0)))
-    master.run()
-
+    main()

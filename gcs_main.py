@@ -1,94 +1,72 @@
-import sys
+import math
+import socket
 import json
-from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar, QPushButton
-from PyQt5.QtCore import pyqtSlot
-from PyQt5.QtGui import QFont
-from gui.udp_listener import UDPTelemetryListener
-from gui.cmd_sender import GCSCommandSender
+import time
+# ======= 3. Adım: Yer Kontrol ve Hakem Sunucusu Modülü (gcs_main.py)   =================
+# ============================================================
+# HAKEM SUNUCUSU VE COĞRAFİ KONUMLANDIRMA SABİTLERİ
+# ============================================================
+HAKEM_IP = "127.0.0.1"           # Hakem sunucusu IP adresi (Yarışma alanında verilecek)
+HAKEM_PORT = 10000               # Hakem sunucusu UDP portu
+TAKIM_ID = 1903                  # Teknofest Takım ID'miz
 
-class GCSWindow(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        with open("config_gcs.json", "r") as f: 
-            self.config = json.load(f)
-            
-        net = self.config["network_settings"]
-        self.commander = GCSCommandSender(net["uav_ip"], net["command_port"])
-        
-        self.setWindowTitle(self.config["gui_settings"]["window_title"])
-        self.resize(700, 450)
-        self.setStyleSheet("QMainWindow { background-color: #1e1e24; }")
 
-        cw = QWidget()
-        self.setCentralWidget(cw)
-        layout = QVBoxLayout(cw)
+def hedef_gps_hesapla(drone_lat, drone_lon, drone_alt, heading_deg,
+                      error_x, error_y, image_width, image_height,
+                      h_fov_deg=60.0, v_fov_deg=45.0):
+    """
+    Kamera piksel sapmalarını ve İHA telemetrisini kullanarak
+    hedefin dünya üzerindeki kesin GPS (Enlem/Boylam) koordinatını hesaplar.
+    """
+    h_aci_orani = h_fov_deg / image_width
+    v_aci_orani = v_fov_deg / image_height
 
-        # Başlık
-        self.lbl_title = QLabel("TEKNOFEST Savaşan İHA - Canlı İzleme")
-        self.lbl_title.setFont(QFont("Arial", 14, QFont.Bold))
-        self.lbl_title.setStyleSheet("color: #ffffff; padding: 5px;")
-        layout.addWidget(self.lbl_title)
+    yaw_sapma_aci = error_x * h_aci_orani
+    pitch_sapma_aci = error_y * v_aci_orani
 
-        # Uçuş Modu ve Durum alanı
-        self.lbl_mode = QLabel("MOD: BAĞLANTI BEKLENİYOR")
-        self.lbl_mode.setFont(QFont("Arial", 14, QFont.Bold))
-        self.lbl_mode.setStyleSheet("color: #ffcc00; background-color: #2a2a35; padding: 10px; border-radius: 5px;")
-        layout.addWidget(self.lbl_mode)
+    # Kameraya göre (drone burnu = 0°) yerel offsetler
+    mesafe_kamera_saga = drone_alt * math.tan(math.radians(yaw_sapma_aci))
+    mesafe_kamera_ileri = drone_alt * math.tan(math.radians(pitch_sapma_aci))
 
-        # --- YENİ EKLENEN CANLI UÇUŞ VERİLERİ (İRTİFA VE GPS) ---
-        self.lbl_flight_data = QLabel("İrtifa (Yükseklik): 0.0 metre\nEnlem: 0.000000\nBoylam: 0.000000")
-        self.lbl_flight_data.setFont(QFont("Courier New", 13, QFont.Bold))
-        self.lbl_flight_data.setStyleSheet("color: #00ffcc; background-color: #121214; padding: 15px; border-radius: 5px; line-height: 20px;")
-        layout.addWidget(self.lbl_flight_data)
+    # Drone'un gerçek heading'ine göre kuzey/doğu eksenine döndür
+    heading_rad = math.radians(heading_deg)
+    mesafe_kuzey = mesafe_kamera_ileri * math.cos(heading_rad) - mesafe_kamera_saga * math.sin(heading_rad)
+    mesafe_dogu = mesafe_kamera_ileri * math.sin(heading_rad) + mesafe_kamera_saga * math.cos(heading_rad)
 
-        # Pil Barı
-        self.pbar = QProgressBar()
-        self.pbar.setStyleSheet("QProgressBar { border: 1px solid grey; border-radius: 5px; text-align: center; color: white; }"
-                                "QProgressBar::chunk { background-color: #05b04c; }")
-        layout.addWidget(self.pbar)
+    delta_lat = mesafe_kuzey / 111000.0
+    delta_lon = mesafe_dogu / (111000.0 * math.cos(math.radians(drone_lat)))
 
-        # Butonlar
-        btn_layout = QHBoxLayout()
-        self.btn_rtl = QPushButton("ACİL EVE DÖNDÜR (RTL)")
-        self.btn_rtl.setStyleSheet("background-color: #d9534f; color: white; font-weight: bold; padding: 10px;")
-        self.btn_rtl.clicked.connect(self.commander.send_force_rtl)
-        btn_layout.addWidget(self.btn_rtl)
-        layout.addLayout(btn_layout)
+    return drone_lat + delta_lat, drone_lon + delta_lon
 
-        # Dinleyiciyi Başlat
-        self.listener = UDPTelemetryListener(net["listen_ip"], net["telemetry_port"])
-        self.listener.telemetry_received.connect(self.handle_telem)
-        self.listener.connection_lost.connect(self.handle_loss)
-        self.listener.start()
 
-    @pyqtSlot(dict)
-    def handle_telem(self, data):
-        # Durum ve Mod Güncelleme
-        self.lbl_mode.setText(f"DURUM: AKTİF | MOD: {data['mode']}")
-        self.lbl_mode.setStyleSheet("color: #00ff00; background-color: #2a2a35; padding: 10px; border-radius: 5px;")
-        self.pbar.setValue(data["battery_percent"])
-        
-        # --- CANLI OLARAK İRTİFA, ENLEM VE BOYLANIN EKRANA YAZILMASI ---
-        altitude = data.get("relative_alt", 0.0)
-        lat = data.get("lat", 0.0)
-        lon = data.get("lon", 0.0)
-        
-        self.lbl_flight_data.setText(
-            f"🚀 İrtifa (Yükseklik): {altitude:.2f} metre\n"
-            f"📍 Enlem (Latitude):   {lat:.6f}\n"
-            f"📍 Boylam (Longitude): {lon:.6f}"
-        )
+class HakemHaberlesme:
+    """
+    Teknofest Hakem Sunucusu ile UDP üzerinden JSON tabanlı haberleşmeyi
+    ve bağlantı ömrünü yöneten yardımcı sınıf.
+    """
+    def __init__(self, ip=HAKEM_IP, port=HAKEM_PORT, takim_id=TAKIM_ID):
+        self.ip = ip
+        self.port = port
+        self.takim_id = takim_id
+        self.soket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        print(f"[GCS] Hakem Sunucusu iletişim ağı hazır ({self.ip}:{self.port})")
 
-    @pyqtSlot()
-    def handle_loss(self): 
-        self.lbl_mode.setText("BAĞLANTI KOPUK!")
-        self.lbl_mode.setStyleSheet("color: white; background-color: #d9534f; padding: 10px; border-radius: 5px;")
-        self.lbl_flight_data.setText("İrtifa (Yükseklik): ---\nEnlem: ---\nBoylam: ---")
-        self.pbar.setValue(0)
+    def paket_gonder(self, hedef_lat, hedef_lon, kilitlenme_durum, kilitlenme_sure, ucus_durum):
+        try:
+            veri_paketi = {
+                "takim_id": self.takim_id,
+                "hedef_enlem": round(hedef_lat, 6),
+                "hedef_boylam": round(hedef_lon, 6),
+                "kilitlenme": int(kilitlenme_durum),
+                "kilitlenme_suresi": round(kilitlenme_sure, 1),
+                "gorev_durumu": ucus_durum,
+                "zaman_damgasi": time.time()
+            }
+            paket_json = json.dumps(veri_paketi).encode('utf-8')
+            self.soket.sendto(paket_json, (self.ip, self.port))
+        except Exception:
+            pass  # Olası ağ bağlantı hataları uçuş güvenliğini etkilememelidir
 
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    w = GCSWindow()
-    w.show()
-    sys.exit(app.exec_())
-
+    def kapat(self):
+        self.soket.close()
+        print("[GCS] Hakem haberleşme soketi güvenli şekilde kapatıldı.")
